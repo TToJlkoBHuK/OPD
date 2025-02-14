@@ -23,6 +23,7 @@ dp = Dispatcher(bot)
 PROGRESS_FILE = "user_progress.txt"
 BANS_FILE = "user_bans.txt"
 USERS_FILE = "users.txt"  # Файл для хранения ID пользователей и их статусов
+BROADCAST_TEMPLATE_FILE = "broadcast_template.txt"  # Файл для хранения шаблона рассылки
 
 # Глобальные переменные
 ADMIN_IDS = [1881684121, 5312321185]  # 5312321185 Rus 1881684121
@@ -34,8 +35,38 @@ users_status = {}  # Статусы пользователей: {user_id: status
 # Глобальная переменная для хранения никнеймов пользователей
 user_nicknames = {}  # {user_id: nickname}
 
+# Очередь для отправки сообщений администраторам
+message_queue = asyncio.Queue()
+
+# Задержка между отправками сообщений (в секундах)
+SEND_DELAY = 1
+
+async def process_message_queue():
+    while True:
+        # Получаем сообщение из очереди
+        chat_id, message_text, media = await message_queue.get()
+        try:
+            if media:
+                # Если есть медиафайлы, отправляем медиагруппу
+                await bot.send_media_group(chat_id=chat_id, media=media)
+                logging.info(f"Медиагруппа отправлена админу {chat_id}.")
+            else:
+                # Если нет медиафайлов, отправляем текстовое сообщение
+                await bot.send_message(chat_id=chat_id, text=message_text)
+                logging.info(f"Текстовое сообщение отправлено админу {chat_id}.")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке сообщения админу {chat_id}: {e}")
+        finally:
+            # Добавляем задержку между отправками
+            await asyncio.sleep(SEND_DELAY)
+            # Помечаем задачу как выполненную
+            message_queue.task_done()
+
+# Глобальная переменная для отслеживания текущей группы
+global_group_index = 0
+
 def load_data():
-    global sent_groups, current_group_index, user_bans, users_status
+    global sent_groups, current_group_index, user_bans, users_status, global_group_index
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -49,10 +80,19 @@ def load_data():
                         # Фильтруем только числовые значения для group_indices
                         valid_indices = [int(index) for index in group_indices if index.isdigit()]
                         sent_groups[user_id] = valid_indices
-                        current_group_index[user_id] = len(valid_indices)
+                        current_group_index[user_id] = valid_indices[-1] if valid_indices else -1  # Последний индекс отправленной группы
                     except ValueError as e:
                         logging.error(f"Ошибка при загрузке данных из строки: {line.strip()}. Ошибка: {e}")
                         continue  # Пропускаем некорректные строки
+        # Определяем максимальный индекс группы среди всех пользователей
+        if sent_groups:  # Проверяем, что sent_groups не пуст
+            max_group_index = max((max(indices) for indices in sent_groups.values()), default=0)
+            global_group_index = max_group_index + 1  # Устанавливаем глобальный индекс на следующую группу
+        else:
+            global_group_index = 0  # Если sent_groups пуст, начинаем с нуля
+    else:
+        global_group_index = 0  # Если файла нет, начинаем с нуля
+
     if os.path.exists(BANS_FILE):
         with open(BANS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -63,6 +103,7 @@ def load_data():
                         user_bans[int(user_id)] = float(ban_time)
                     except ValueError as e:
                         logging.error(f"Ошибка при загрузке блокировки из строки: {line.strip()}. Ошибка: {e}")
+
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -134,7 +175,7 @@ def get_admin_keyboard(user_id):
 def get_admin_panel():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)  # Используем ReplyKeyboardMarkup
     keyboard.add(KeyboardButton("/run"), KeyboardButton("/send_groups"))
-    keyboard.add(KeyboardButton("/users"))
+    keyboard.add(KeyboardButton("/users"), KeyboardButton("Изменить шаблон"))
     return keyboard
 
 # Клавиатура для списка пользователей
@@ -149,6 +190,35 @@ def get_users_list_keyboard():
             button_text = f"ID: {user_id} | Статус: {status or 'Без статуса'}"
         keyboard.add(InlineKeyboardButton(button_text, callback_data=f"user_select:{user_id}"))
     return keyboard
+
+# Загрузка шаблона рассылки
+def load_broadcast_template():
+    if os.path.exists(BROADCAST_TEMPLATE_FILE):
+        with open(BROADCAST_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    return (
+        "Hello! We invite your university team ([вставить название вуза в скобках]) to participate in the 8th Interuniversity Team Battle, "
+        "the largest interuniversity online tournament on Lichess.\n\n"
+        "📅 Date & Time: February 23, 2025 – 12:00 UTC\n"
+        "⏳ Time Control: 3+0 Blitz, Rated\n"
+        "🔗 Tournament Link: https://lichess.org/tournament/2OVexrSo\n\n"
+        "1st Hunger Games – March 23, 2025 |Unique Format|\n"
+        "https://lichess.org/tournament/oHZ8MI8c\n\n"
+        "9th Interuniversity Team Battle – March 30, 2025 |3+3 Chess960|\n"
+        "https://lichess.org/tournament/R9VQU47N\n\n"
+        "10th Interuniversity Team Battle – April 27, 2025 |5+0 Blitz|\n"
+        "https://lichess.org/tournament/dKuocHFV\n\n"
+        "Participation is free and open to all university teams. Feel free to share this invitation with your club members. "
+        "We look forward to seeing your team compete!\n\n"
+        "Best regards,\n"
+        "[вставить ваше имя]\n"
+        "Interuniversity Team Battles Coordinator"
+    )
+
+# Сохранение шаблона рассылки
+def save_broadcast_template(template_text):
+    with open(BROADCAST_TEMPLATE_FILE, "w", encoding="utf-8") as f:
+        f.write(template_text)
 
 # Обработка Excel-файла и создание групп
 def process_excel():
@@ -274,39 +344,44 @@ async def list_users(message: types.Message):
         await message.answer("Нет зарегистрированных пользователей.")
         return
     await message.answer("Список пользователей:", reply_markup=get_users_list_keyboard())
+# Словарь для отслеживания состояний администраторов
+admin_states = {}  # {user_id: state}
+
+# Обработка кнопки "Изменить шаблон"
+@dp.message_handler(lambda message: message.text == "Изменить шаблон")
+async def change_broadcast_template(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("У вас нет прав для выполнения этого действия.")
+        return
+    # Переводим администратора в состояние ожидания нового шаблона
+    admin_states[user_id] = "waiting_for_template"
+    await message.answer("Пожалуйста, отправьте новый текст шаблона.")
+
+# Обработка нового шаблона
+@dp.message_handler(lambda message: message.from_user.id in admin_states and admin_states[message.from_user.id] == "waiting_for_template")
+async def update_broadcast_template(message: types.Message):
+    user_id = message.from_user.id
+    new_template = message.text
+    # Сохраняем новый шаблон в файл
+    save_broadcast_template(new_template)
+    # Удаляем состояние администратора
+    del admin_states[user_id]
+    await message.answer("Шаблон успешно обновлен!")
 
 # Обработка кнопки "Шаблон рассылки"
 @dp.callback_query_handler(lambda c: c.data == "show_broadcast_template")
 async def show_broadcast_template(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
-
-    # Текст шаблона для рассылок
-    template_text = (
-        "Hello! We invite your university team ([вставить название вуза в скобках]) to participate in the 8th Interuniversity Team Battle, the largest interuniversity online tournament on Lichess.\n\n"
-        "📅 Date & Time: February 23, 2025 – 12:00 UTC\n"
-        "⏳ Time Control: 3+0 Blitz, Rated\n"
-        "🔗 Tournament Link: https://lichess.org/tournament/2OVexrSo\n\n"
-        "1st Hunger Games – March 23, 2025 |Unique Format|\n"
-        "https://lichess.org/tournament/oHZ8MI8c\n\n"
-        "9th Interuniversity Team Battle – March 30, 2025 |3+3 Chess960|\n"
-        "https://lichess.org/tournament/R9VQU47N\n\n"
-        "10th Interuniversity Team Battle – April 27, 2025 |5+0 Blitz|\n"
-        "https://lichess.org/tournament/dKuocHFV\n\n"
-        "Participation is free and open to all university teams. Feel free to share this invitation with your club members. We look forward to seeing your team compete!\n\n"
-        "Best regards,\n"
-        "[вставить ваше имя]\n"
-        "Interuniversity Team Battles Coordinator"
-    )
-
+    # Загружаем текущий шаблон
+    template_text = load_broadcast_template()
     # Клавиатура с кнопкой возврата
     keyboard = InlineKeyboardMarkup()
     keyboard.row(
         InlineKeyboardButton("Вернуться в меню", callback_data="return_to_menu")
     )
-
     # Отправляем шаблон текста и клавиатуру
     await bot.send_message(user_id, template_text, reply_markup=keyboard)
-
     # Удаляем старое сообщение с кнопками
     await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)
 
@@ -428,14 +503,11 @@ async def set_user_status(callback_query: types.CallbackQuery):
         text=f"Статус пользователя {user_id} изменен на: {status or 'Без статуса'}",
         reply_markup=get_admin_keyboard(user_id)
     )
-# Глобальная переменная для отслеживания текущей группы
-global_group_index = 0
 
 # Обработка кнопки "Получить следующую группу"
 @dp.callback_query_handler(lambda c: c.data == "get_next_group")
 async def get_next_group(callback_query: types.CallbackQuery):
     global global_group_index  # Используем глобальный счетчик
-
     user_id = callback_query.from_user.id
 
     # Проверяем, есть ли группы для отправки
@@ -443,13 +515,15 @@ async def get_next_group(callback_query: types.CallbackQuery):
         await bot.answer_callback_query(callback_query.id, "Группы еще не созданы. Сначала выполните команду /run.")
         return
 
-    # Получаем индекс текущей группы
-    group_index = global_group_index
+    # Получаем индекс текущей группы для пользователя
+    if user_id in current_group_index:
+        group_index = current_group_index[user_id] + 1  # Начинаем со следующей группы
+    else:
+        group_index = global_group_index  # Если пользователь новый, используем глобальный индекс
 
-    # Проверяем, остались ли группы для отправки
+    # Проверяем, остались ли группы для отправкиs
     if group_index >= len(groups_data):
-        global_group_index = 0  # Сбрасываем счетчик, если достигнут конец списка групп
-        group_index = 0
+        group_index = 0  # Сбрасываем счетчик, если достигнут конец списка групп
         await bot.answer_callback_query(callback_query.id, "Группы закончились. Начинаем сначала.")
 
     # Получаем группу
@@ -464,10 +538,11 @@ async def get_next_group(callback_query: types.CallbackQuery):
     if user_id not in sent_groups:
         sent_groups[user_id] = []
     sent_groups[user_id].append(group_index)
+    current_group_index[user_id] = group_index  # Обновляем текущий индекс для пользователя
     save_data()
 
     # Увеличиваем глобальный счетчик для следующего пользователя
-    global_group_index += 1
+    global_group_index = max(global_group_index, group_index + 1)
 
     # Удаляем старое сообщение с кнопкой
     await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)
@@ -501,20 +576,23 @@ media_groups = {}
 # Словарь для отслеживания обработанных медиагрупп
 processed_media_groups = {}
 
+# Словарь для отслеживания обработанных медиагрупп
+processed_media_groups = {}
+
 # Обработка медиагрупп
 @dp.message_handler(content_types=types.ContentType.ANY)
 async def handle_media(message: types.Message):
     user_id = message.from_user.id
     username = message.from_user.username or "Пользователь"  # Получаем ник пользователя или используем "Пользователь"
-
+    
     # Если это часть медиагруппы
     if message.media_group_id:
         media_group_id = message.media_group_id
-
+        
         # Игнорируем уже обработанные медиагруппы
         if media_group_id in processed_media_groups:
             return
-
+        
         # Создаем запись для медиагруппы, если её ещё нет
         if media_group_id not in media_groups:
             media_groups[media_group_id] = {
@@ -523,19 +601,19 @@ async def handle_media(message: types.Message):
                 "username": username,  # Сохраняем ник отправителя
                 "timestamp": time.time()
             }
-
+        
         # Добавляем файл в медиагруппу
         media_groups[media_group_id]["files"].append(message)
-
+        
         # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
         await asyncio.sleep(5)
-
+        
         # Проверяем, завершена ли медиагруппа
         if media_group_id in media_groups and time.time() - media_groups[media_group_id]["timestamp"] > 5:
             files = media_groups[media_group_id]["files"]
             sender_id = media_groups[media_group_id]["sender_id"]
             sender_username = media_groups[media_group_id]["username"]
-
+            
             # Формируем список медиафайлов
             media = []
             for file in files:
@@ -545,29 +623,43 @@ async def handle_media(message: types.Message):
                     media.append(types.InputMediaDocument(file.document.file_id))
                 elif file.video:
                     media.append(types.InputMediaVideo(file.video.file_id))
-
-            # Пересылаем медиагруппу
-            try:
-                await bot.send_media_group(chat_id=ADMIN_IDS[0], media=media)
-            except Exception as e:
-                logging.error(f"Ошибка при отправке медиагруппы: {e}")
-
-            # Отправляем информацию о отправителе
+            
+            # Отправляем медиагруппу каждому администратору
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_media_group(chat_id=admin_id, media=media)
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке медиагруппы админу {admin_id}: {e}")
+            
+            # Отправляем информацию о отправителе каждому администратору
             sender_info = f"Медиагруппа от пользователя @{sender_username} (ID: {sender_id})"
-            await bot.send_message(chat_id=ADMIN_IDS[0], text=sender_info)
-
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(chat_id=admin_id, text=sender_info)
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке информации админу {admin_id}: {e}")
+            
             # Удаляем медиагруппу из временного словаря
             if media_group_id in media_groups:
                 del media_groups[media_group_id]
-
+            
             # Отмечаем медиагруппу как обработанную
             processed_media_groups[media_group_id] = True
-
     else:
-        # Если это отдельный файл, просто пересылаем его
-        await message.forward(chat_id=ADMIN_IDS[0])
+        # Если это отдельный файл, просто пересылаем его каждому администратору
+        for admin_id in ADMIN_IDS:
+            try:
+                await message.forward(chat_id=admin_id)
+            except Exception as e:
+                logging.error(f"Ошибка при пересылке файла админу {admin_id}: {e}")
+        
+        # Отправляем информацию о отправителе каждому администратору
         sender_info = f"Файл от пользователя @{message.from_user.username or 'Пользователь'} (ID: {user_id})"
-        await bot.send_message(chat_id=ADMIN_IDS[0], text=sender_info)
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(chat_id=admin_id, text=sender_info)
+            except Exception as e:
+                logging.error(f"Ошибка при отправке информации админу {admin_id}: {e}")
 
 # Обновление никнеймов при взаимодействии с ботом
 @dp.message_handler()
@@ -576,8 +668,13 @@ async def update_user_nickname(message: types.Message):
     nickname = message.from_user.username  # Берем только username, без "Неизвестный пользователь"
     if nickname:  # Добавляем ник только если он существует
         user_nicknames[user_id] = nickname
+
+async def on_startup(dp):
+    # Запускаем обработку очереди сообщений как фоновую задачу
+    asyncio.create_task(process_message_queue())
+
 # Запуск бота
 if __name__ == '__main__':
     logging.info("Бот запущен")
     load_data()
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)

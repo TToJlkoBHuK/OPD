@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 # Инициализация бота
-API_TOKEN = ''  # Замените на ваш токен
+API_TOKEN = '7556944103:AAHg5_uLPDeEDHVIXZdvqgIDrVkduJ42V7g'  # Замените на ваш токен
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
@@ -66,7 +66,7 @@ async def process_message_queue():
 global_group_index = 0
 
 def load_data():
-    global sent_groups, current_group_index, user_bans, users_status, global_group_index
+    global sent_groups, current_group_index, user_bans, users_status, global_group_index, user_nicknames
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -80,7 +80,7 @@ def load_data():
                         # Фильтруем только числовые значения для group_indices
                         valid_indices = [int(index) for index in group_indices if index.isdigit()]
                         sent_groups[user_id] = valid_indices
-                        current_group_index[user_id] = valid_indices[-1] if valid_indices else -1  # Последний индекс отправленной группы
+                        current_group_index[user_id] = len(valid_indices) - 1  # Последний индекс отправленной группы
                     except ValueError as e:
                         logging.error(f"Ошибка при загрузке данных из строки: {line.strip()}. Ошибка: {e}")
                         continue  # Пропускаем некорректные строки
@@ -90,8 +90,6 @@ def load_data():
             global_group_index = max_group_index + 1  # Устанавливаем глобальный индекс на следующую группу
         else:
             global_group_index = 0  # Если sent_groups пуст, начинаем с нуля
-    else:
-        global_group_index = 0  # Если файла нет, начинаем с нуля
 
     if os.path.exists(BANS_FILE):
         with open(BANS_FILE, "r", encoding="utf-8") as f:
@@ -115,6 +113,18 @@ def load_data():
                     except ValueError as e:
                         logging.error(f"Ошибка при загрузке статуса из строки: {line.strip()}. Ошибка: {e}")
 
+    # Загрузка никнеймов
+    if os.path.exists("nicknames.txt"):
+        with open("nicknames.txt", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(":")
+                if len(parts) == 2:  # Убедимся, что строка содержит user_id и nickname
+                    user_id, nickname = parts
+                    try:
+                        user_nicknames[int(user_id)] = nickname
+                    except ValueError as e:
+                        logging.error(f"Ошибка при загрузке никнейма из строки: {line.strip()}. Ошибка: {e}")
+
 # Сохранение данных в файлы
 def save_data():
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
@@ -126,6 +136,10 @@ def save_data():
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         for user_id, status in users_status.items():
             f.write(f"{user_id},{status}\n")
+    # Сохранение никнеймов
+    with open("nicknames.txt", "w", encoding="utf-8") as f:
+        for user_id, nickname in user_nicknames.items():
+            f.write(f"{user_id}:{nickname}\n")
 
 # Проверка блокировки пользователя
 def is_user_banned(user_id):
@@ -169,6 +183,10 @@ def get_admin_keyboard(user_id):
     keyboard.row(
         InlineKeyboardButton("Снять бан", callback_data=f"remove_ban:{user_id}")
     )
+    # Добавляем кнопку "Вернуться к списку пользователей"
+    keyboard.row(
+        InlineKeyboardButton("Вернуться к списку пользователей", callback_data="return_to_users_list")
+    )
     return keyboard
 
 # Клавиатура для администраторов
@@ -182,12 +200,12 @@ def get_admin_panel():
 def get_users_list_keyboard():
     keyboard = InlineKeyboardMarkup()
     for user_id, status in users_status.items():
-        # Если никнейма нет, не добавляем его в текст кнопки
-        nickname = user_nicknames.get(user_id, "")  # Получаем ник или пустую строку
-        if nickname:
-            button_text = f"ID: {user_id} | Ник: {nickname} | Статус: {status or 'Без статуса'}"
+        # Получаем никнейм пользователя или используем "ID: {user_id}", если никнейма нет
+        nickname = user_nicknames.get(user_id, f"ID: {user_id}")
+        if nickname.startswith("ID:"):
+            button_text = f"{nickname} | Статус: {status or 'Без статуса'}"
         else:
-            button_text = f"ID: {user_id} | Статус: {status or 'Без статуса'}"
+            button_text = f"@{nickname} | Статус: {status or 'Без статуса'}"
         keyboard.add(InlineKeyboardButton(button_text, callback_data=f"user_select:{user_id}"))
     return keyboard
 
@@ -428,6 +446,19 @@ async def send_instruction(callback_query: types.CallbackQuery):
     # Удаляем старое сообщение с кнопками
     await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)
 
+@dp.callback_query_handler(lambda c: c.data == "return_to_users_list")
+async def return_to_users_list(callback_query: types.CallbackQuery):
+    admin_id = callback_query.from_user.id
+    if admin_id not in ADMIN_IDS:
+        await bot.answer_callback_query(callback_query.id, "У вас нет прав для выполнения этого действия.")
+        return
+    
+    # Удаляем старое сообщение
+    await bot.delete_message(chat_id=admin_id, message_id=callback_query.message.message_id)
+    
+    # Отправляем список пользователей
+    await bot.send_message(admin_id, "Список пользователей:", reply_markup=get_users_list_keyboard())
+
 # Обработка кнопки "Снять бан"
 @dp.callback_query_handler(lambda c: c.data.startswith("remove_ban:"))
 async def remove_ban(callback_query: types.CallbackQuery):
@@ -435,19 +466,19 @@ async def remove_ban(callback_query: types.CallbackQuery):
     if admin_id not in ADMIN_IDS:
         await bot.answer_callback_query(callback_query.id, "У вас нет прав для выполнения этого действия.")
         return
-
+    
     _, user_id = callback_query.data.split(":")
     user_id = int(user_id)
-
+    
     # Проверяем, заблокирован ли пользователь
     if user_id not in user_bans:
         await bot.answer_callback_query(callback_query.id, "Пользователь не заблокирован.")
         return
-
+    
     # Снимаем блокировку
     del user_bans[user_id]
     save_data()
-
+    
     # Отправляем уведомление пользователю
     try:
         await bot.send_message(
@@ -459,14 +490,17 @@ async def remove_ban(callback_query: types.CallbackQuery):
         logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
         await bot.answer_callback_query(callback_query.id, "Не удалось отправить уведомление пользователю.")
         return
-
-    # Уведомляем администратора
-    await bot.edit_message_text(
+    
+    # Удаляем старое сообщение
+    await bot.delete_message(chat_id=admin_id, message_id=callback_query.message.message_id)
+    
+    # Отправляем новое сообщение с подтверждением и кнопкой возврата
+    await bot.send_message(
         chat_id=admin_id,
-        message_id=callback_query.message.message_id,
-        text=f"Блокировка пользователя {user_id} успешно снята."
+        text=f"Блокировка пользователя {user_id} успешно снята.",
+        reply_markup=get_admin_keyboard(user_id)
     )
-
+    
     # Запускаем таймер на 24 часа
     asyncio.create_task(restore_ban_if_inactive(user_id))
 
@@ -493,13 +527,18 @@ async def set_user_status(callback_query: types.CallbackQuery):
     if admin_id not in ADMIN_IDS:
         await bot.answer_callback_query(callback_query.id, "У вас нет прав для выполнения этого действия.")
         return
+    
     _, user_id, status = callback_query.data.split(":")
     user_id = int(user_id)
     users_status[user_id] = status
     save_data()
-    await bot.edit_message_text(
+    
+    # Удаляем старое сообщение
+    await bot.delete_message(chat_id=admin_id, message_id=callback_query.message.message_id)
+    
+    # Отправляем новое сообщение с обновлённым статусом и кнопкой возврата
+    await bot.send_message(
         chat_id=admin_id,
-        message_id=callback_query.message.message_id,
         text=f"Статус пользователя {user_id} изменен на: {status or 'Без статуса'}",
         reply_markup=get_admin_keyboard(user_id)
     )
@@ -665,7 +704,7 @@ async def handle_media(message: types.Message):
 @dp.message_handler()
 async def update_user_nickname(message: types.Message):
     user_id = message.from_user.id
-    nickname = message.from_user.username  # Берем только username, без "Неизвестный пользователь"
+    nickname = message.from_user.username  # Берем username, если он существует
     if nickname:  # Добавляем ник только если он существует
         user_nicknames[user_id] = nickname
 

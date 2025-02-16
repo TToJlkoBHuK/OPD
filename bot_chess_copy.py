@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 # Инициализация бота
-API_TOKEN = '7556944103:AAHg5_uLPDeEDHVIXZdvqgIDrVkduJ42V7g'  # Замените на ваш токен
+API_TOKEN = ''  # Замените на ваш токен
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 

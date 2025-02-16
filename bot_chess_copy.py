@@ -6,6 +6,7 @@ from aiogram.utils import executor
 from openpyxl import load_workbook
 import os
 import time
+import shutil
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,6 +25,8 @@ PROGRESS_FILE = "user_progress.txt"
 BANS_FILE = "user_bans.txt"
 USERS_FILE = "users.txt"  # Файл для хранения ID пользователей и их статусов
 BROADCAST_TEMPLATE_FILE = "broadcast_template.txt"  # Файл для хранения шаблона рассылки
+# Путь к папке для хранения медиа
+MEDIA_FOLDER = "user_media"
 
 # Глобальные переменные
 ADMIN_IDS = [1881684121, 5312321185]  # 5312321185 Rus 1881684121
@@ -34,12 +37,19 @@ user_bans = {}  # Блокировки пользователей: {user_id: ban
 users_status = {}  # Статусы пользователей: {user_id: status}
 # Глобальная переменная для хранения никнеймов пользователей
 user_nicknames = {}  # {user_id: nickname}
-
+# Словарь для временного хранения медиагрупп
+media_groups = {}
+# Словарь для отслеживания времени последней отправки медиа
+last_media_time = {}
 # Очередь для отправки сообщений администраторам
 message_queue = asyncio.Queue()
 
 # Задержка между отправками сообщений (в секундах)
 SEND_DELAY = 1
+
+# Создаем папку для медиа, если она не существует
+if not os.path.exists(MEDIA_FOLDER):
+    os.makedirs(MEDIA_FOLDER)
 
 async def process_message_queue():
     while True:
@@ -179,9 +189,11 @@ def get_admin_keyboard(user_id):
         InlineKeyboardButton("✅", callback_data=f"set_status:{user_id}:✅"),
         InlineKeyboardButton("Очистить", callback_data=f"set_status:{user_id}:")
     )
-    # Добавляем кнопку "Снять бан"
     keyboard.row(
         InlineKeyboardButton("Снять бан", callback_data=f"remove_ban:{user_id}")
+    )
+    keyboard.row(
+        InlineKeyboardButton("Просмотреть медиа", callback_data=f"view_media:{user_id}")
     )
     # Добавляем кнопку "Вернуться к списку пользователей"
     keyboard.row(
@@ -449,13 +461,14 @@ async def send_instruction(callback_query: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "return_to_users_list")
 async def return_to_users_list(callback_query: types.CallbackQuery):
     admin_id = callback_query.from_user.id
+
     if admin_id not in ADMIN_IDS:
         await bot.answer_callback_query(callback_query.id, "У вас нет прав для выполнения этого действия.")
         return
-    
+
     # Удаляем старое сообщение
     await bot.delete_message(chat_id=admin_id, message_id=callback_query.message.message_id)
-    
+
     # Отправляем список пользователей
     await bot.send_message(admin_id, "Список пользователей:", reply_markup=get_users_list_keyboard())
 
@@ -504,13 +517,56 @@ async def remove_ban(callback_query: types.CallbackQuery):
     # Запускаем таймер на 24 часа
     asyncio.create_task(restore_ban_if_inactive(user_id))
 
+@dp.callback_query_handler(lambda c: c.data.startswith("view_media:"))
+async def view_media(callback_query: types.CallbackQuery):
+    admin_id = callback_query.from_user.id
+    _, user_id = callback_query.data.split(":")
+    user_id = int(user_id)
+
+    # Путь к папке пользователя
+    user_folder = os.path.join(MEDIA_FOLDER, str(user_id))
+
+    if os.path.exists(user_folder):
+        # Формируем список медиафайлов
+        media_files = []
+        for file_name in os.listdir(user_folder):
+            file_path = os.path.join(user_folder, file_name)
+            if file_name.endswith(".jpg"):
+                media_files.append(types.InputMediaPhoto(open(file_path, "rb")))
+            elif file_name.endswith(".doc"):
+                media_files.append(types.InputMediaDocument(open(file_path, "rb")))
+            elif file_name.endswith(".mp4"):
+                media_files.append(types.InputMediaVideo(open(file_path, "rb")))
+
+        # Разделяем медиафайлы на группы по 10 элементов
+        media_groups = [media_files[i:i + 10] for i in range(0, len(media_files), 10)]
+
+        if media_groups:
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(
+                InlineKeyboardButton("Вернуться", callback_data=f"user_select:{user_id}")
+            )
+
+            # Отправляем каждую группу медиа
+            for group in media_groups:
+                await bot.send_media_group(chat_id=admin_id, media=group)
+
+            # Отправляем сообщение после всех медиа
+            await bot.send_message(chat_id=admin_id, text="Медиа пользователя:", reply_markup=keyboard)
+        else:
+            await bot.send_message(chat_id=admin_id, text="У пользователя нет медиа.", reply_markup=get_admin_keyboard(user_id))
+    else:
+        # Если папка не существует, отправляем сообщение об этом
+        keyboard = InlineKeyboardMarkup()
+        keyboard.row(
+            InlineKeyboardButton("Вернуться", callback_data=f"user_select:{user_id}")
+        )
+        await bot.send_message(chat_id=admin_id, text="У пользователя нет медиа.", reply_markup=keyboard)
+
 # Обработка выбора пользователя
 @dp.callback_query_handler(lambda c: c.data.startswith("user_select:"))
 async def select_user(callback_query: types.CallbackQuery):
     admin_id = callback_query.from_user.id
-    if admin_id not in ADMIN_IDS:
-        await bot.answer_callback_query(callback_query.id, "У вас нет прав для выполнения этого действия.")
-        return
     _, user_id = callback_query.data.split(":")
     user_id = int(user_id)
     await bot.edit_message_text(
@@ -615,90 +671,78 @@ media_groups = {}
 # Словарь для отслеживания обработанных медиагрупп
 processed_media_groups = {}
 
-# Словарь для отслеживания обработанных медиагрупп
-processed_media_groups = {}
-
 # Обработка медиагрупп
 @dp.message_handler(content_types=types.ContentType.ANY)
 async def handle_media(message: types.Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "Пользователь"  # Получаем ник пользователя или используем "Пользователь"
-    
+    username = message.from_user.username or "Пользователь"
+
+    # Путь к папке пользователя
+    user_folder = os.path.join(MEDIA_FOLDER, str(user_id))
+
     # Если это часть медиагруппы
     if message.media_group_id:
         media_group_id = message.media_group_id
-        
-        # Игнорируем уже обработанные медиагруппы
-        if media_group_id in processed_media_groups:
-            return
-        
+
         # Создаем запись для медиагруппы, если её ещё нет
         if media_group_id not in media_groups:
             media_groups[media_group_id] = {
                 "files": [],
                 "sender_id": user_id,
-                "username": username,  # Сохраняем ник отправителя
+                "username": username,
                 "timestamp": time.time()
             }
-        
+
         # Добавляем файл в медиагруппу
         media_groups[media_group_id]["files"].append(message)
-        
-        # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
-        await asyncio.sleep(5)
-        
-        # Проверяем, завершена ли медиагруппа
-        if media_group_id in media_groups and time.time() - media_groups[media_group_id]["timestamp"] > 5:
-            files = media_groups[media_group_id]["files"]
-            sender_id = media_groups[media_group_id]["sender_id"]
-            sender_username = media_groups[media_group_id]["username"]
-            
-            # Формируем список медиафайлов
-            media = []
-            for file in files:
-                if file.photo:
-                    media.append(types.InputMediaPhoto(file.photo[-1].file_id))
-                elif file.document:
-                    media.append(types.InputMediaDocument(file.document.file_id))
-                elif file.video:
-                    media.append(types.InputMediaVideo(file.video.file_id))
-            
-            # Отправляем медиагруппу каждому администратору
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_media_group(chat_id=admin_id, media=media)
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке медиагруппы админу {admin_id}: {e}")
-            
-            # Отправляем информацию о отправителе каждому администратору
-            sender_info = f"Медиагруппа от пользователя @{sender_username} (ID: {sender_id})"
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(chat_id=admin_id, text=sender_info)
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке информации админу {admin_id}: {e}")
-            
-            # Удаляем медиагруппу из временного словаря
-            if media_group_id in media_groups:
-                del media_groups[media_group_id]
-            
-            # Отмечаем медиагруппу как обработанную
-            processed_media_groups[media_group_id] = True
+
     else:
-        # Если это отдельный файл, просто пересылаем его каждому администратору
-        for admin_id in ADMIN_IDS:
-            try:
-                await message.forward(chat_id=admin_id)
-            except Exception as e:
-                logging.error(f"Ошибка при пересылке файла админу {admin_id}: {e}")
-        
-        # Отправляем информацию о отправителе каждому администратору
-        sender_info = f"Файл от пользователя @{message.from_user.username or 'Пользователь'} (ID: {user_id})"
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(chat_id=admin_id, text=sender_info)
-            except Exception as e:
-                logging.error(f"Ошибка при отправке информации админу {admin_id}: {e}")
+        # Если это отдельный файл, создаем новую медиагруппу
+        media_group_id = f"single_{user_id}_{time.time()}"
+        media_groups[media_group_id] = {
+            "files": [message],
+            "sender_id": user_id,
+            "username": username,
+            "timestamp": time.time()
+        }
+
+    # Проверяем, нужно ли объединить медиагруппы
+    current_time = time.time()
+    if user_id in last_media_time and current_time - last_media_time[user_id] < 5:
+        # Если прошло меньше 5 секунд, добавляем медиа к существующим
+        pass
+    else:
+        # Если прошло больше 5 секунд, удаляем старые медиа
+        if os.path.exists(user_folder):
+            shutil.rmtree(user_folder)
+        os.makedirs(user_folder)
+
+    # Обновляем время последней отправки медиа
+    last_media_time[user_id] = current_time
+
+    # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
+    await asyncio.sleep(5)
+
+    # Проверяем, завершена ли медиагруппа
+    for group_id, group_data in list(media_groups.items()):
+        if current_time - group_data["timestamp"] > 5:
+            files = group_data["files"]
+
+            # Сохраняем новые медиа
+            for file in files:
+                file_path = None
+                if file.photo:
+                    file_id = file.photo[-1].file_id
+                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.jpg"))
+                elif file.document:
+                    file_id = file.document.file_id
+                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.doc"))
+                elif file.video:
+                    file_id = file.video.file_id
+                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.mp4"))
+
+            # Удаляем медиагруппу из временного словаря
+            del media_groups[group_id]
 
 # Обновление никнеймов при взаимодействии с ботом
 @dp.message_handler()

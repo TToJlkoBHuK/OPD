@@ -517,6 +517,7 @@ async def remove_ban(callback_query: types.CallbackQuery):
     # Запускаем таймер на 24 часа
     asyncio.create_task(restore_ban_if_inactive(user_id))
 
+# Обработка кнопки "Просмотреть медиа"
 @dp.callback_query_handler(lambda c: c.data.startswith("view_media:"))
 async def view_media(callback_query: types.CallbackQuery):
     admin_id = callback_query.from_user.id
@@ -670,6 +671,8 @@ async def ban_user(callback_query: types.CallbackQuery):
 media_groups = {}
 # Словарь для отслеживания обработанных медиагрупп
 processed_media_groups = {}
+# Блокировка для предотвращения состояния гонки
+media_groups_lock = asyncio.Lock()
 
 # Обработка медиагрупп
 @dp.message_handler(content_types=types.ContentType.ANY)
@@ -696,37 +699,21 @@ async def handle_media(message: types.Message):
         # Добавляем файл в медиагруппу
         media_groups[media_group_id]["files"].append(message)
 
-    else:
-        # Если это отдельный файл, создаем новую медиагруппу
-        media_group_id = f"single_{user_id}_{time.time()}"
-        media_groups[media_group_id] = {
-            "files": [message],
-            "sender_id": user_id,
-            "username": username,
-            "timestamp": time.time()
-        }
+        # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
+        await asyncio.sleep(5)
 
-    # Проверяем, нужно ли объединить медиагруппы
-    current_time = time.time()
-    if user_id in last_media_time and current_time - last_media_time[user_id] < 5:
-        # Если прошло меньше 5 секунд, добавляем медиа к существующим
-        pass
-    else:
-        # Если прошло больше 5 секунд, удаляем старые медиа
-        if os.path.exists(user_folder):
-            shutil.rmtree(user_folder)
-        os.makedirs(user_folder)
+        # Проверяем, завершена ли медиагруппа
+        if media_group_id in media_groups and time.time() - media_groups[media_group_id]["timestamp"] > 5:
+            files = media_groups[media_group_id]["files"]
 
-    # Обновляем время последней отправки медиа
-    last_media_time[user_id] = current_time
+            # Удаляем старые медиа, если они существуют
+            if os.path.exists(user_folder):
+                try:
+                    shutil.rmtree(user_folder)
+                except Exception as e:
+                    logging.error(f"Ошибка при удалении старых файлов: {e}")
 
-    # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
-    await asyncio.sleep(5)
-
-    # Проверяем, завершена ли медиагруппа
-    for group_id, group_data in list(media_groups.items()):
-        if current_time - group_data["timestamp"] > 5:
-            files = group_data["files"]
+            os.makedirs(user_folder, exist_ok=True)
 
             # Сохраняем новые медиа
             for file in files:
@@ -742,7 +729,28 @@ async def handle_media(message: types.Message):
                     file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.mp4"))
 
             # Удаляем медиагруппу из временного словаря
-            del media_groups[group_id]
+            del media_groups[media_group_id]
+
+    else:
+        # Если это отдельный файл, удаляем старые медиа и сохраняем новый файл
+        if os.path.exists(user_folder):
+            try:
+                shutil.rmtree(user_folder)
+            except Exception as e:
+                logging.error(f"Ошибка при удалении старых файлов: {e}")
+
+        os.makedirs(user_folder, exist_ok=True)
+
+        file_path = None
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.jpg"))
+        elif message.document:
+            file_id = message.document.file_id
+            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.doc"))
+        elif message.video:
+            file_id = message.video.file_id
+            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.mp4"))
 
 # Обновление никнеймов при взаимодействии с ботом
 @dp.message_handler()

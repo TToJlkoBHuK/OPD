@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from aiogram.utils.exceptions import MessageCantBeDeleted
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ParseMode, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
@@ -182,24 +183,17 @@ def get_user_keyboard():
     return keyboard
 
 # Клавиатура для изменения статуса пользователя
-def get_admin_keyboard(user_id):
-    keyboard = InlineKeyboardMarkup()
-    keyboard.row(
-        InlineKeyboardButton("❌", callback_data=f"set_status:{user_id}:❌"),
-        InlineKeyboardButton("✅", callback_data=f"set_status:{user_id}:✅"),
-        InlineKeyboardButton("Очистить", callback_data=f"set_status:{user_id}:")
-    )
-    keyboard.row(
-        InlineKeyboardButton("Снять бан", callback_data=f"remove_ban:{user_id}")
-    )
-    keyboard.row(
-        InlineKeyboardButton("Просмотреть медиа", callback_data=f"view_media:{user_id}")
-    )
-    # Добавляем кнопку "Вернуться к списку пользователей"
-    keyboard.row(
-        InlineKeyboardButton("Вернуться к списку пользователей", callback_data="return_to_users_list")
-    )
-    return keyboard
+def get_admin_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="❌", callback_data=f"set_status:{user_id}:❌"),
+            InlineKeyboardButton(text="✅", callback_data=f"set_status:{user_id}:✅"),
+            InlineKeyboardButton(text="Очистить", callback_data=f"set_status:{user_id}:")
+        ],
+        [InlineKeyboardButton(text="Снять бан", callback_data=f"remove_ban:{user_id}")],
+        [InlineKeyboardButton(text="Просмотреть медиа", callback_data=f"view_media:{user_id}")],
+        [InlineKeyboardButton(text="Вернуться к списку пользователей", callback_data="return_to_users_list")]
+    ])
 
 # Клавиатура для администраторов
 def get_admin_panel():
@@ -656,8 +650,12 @@ async def ban_user(callback_query: types.CallbackQuery):
         await bot.answer_callback_query(callback_query.id, "У вас нет доступа к этому действию.")
         return
 
-    # Удаляем старое сообщение с кнопкой
-    await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)
+    try:
+        # Удаляем старое сообщение с кнопкой
+        await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)
+    except MessageCantBeDeleted:
+        # Логируем ошибку, но продолжаем выполнение
+        logging.warning(f"Не удалось удалить сообщение для пользователя {user_id}. Сообщение старше 48 часов или имеет другие ограничения.")
 
     # Блокируем пользователя на 24 часа
     ban_time = time.time() + 24 * 60 * 60  # 24 часа

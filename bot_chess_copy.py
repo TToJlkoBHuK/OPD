@@ -52,6 +52,9 @@ message_queue = asyncio.Queue()
 # Задержка между отправками сообщений (в секундах)
 SEND_DELAY = 1
 
+user_media_accumulation = {}
+MEDIA_ACCUMULATION_DELAY = 2.0 # Секунды ожидания перед обработкой медиа
+
 #===================================================================================================================================================================
 #===================================================================================================================================================================
 #===================================================================================================================================================================
@@ -742,82 +745,147 @@ processed_media_groups = {}
 media_groups_lock = asyncio.Lock()
 
 # Обработка медиагрупп
-@dp.message_handler(content_types=types.ContentType.ANY)
-async def handle_media(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "Пользователь"
+async def process_accumulated_media(user_id: int):
+    """
+    Обрабатывает накопленные медиафайлы для пользователя:
+    удаляет старые, сохраняет новые.
+    """
+    if user_id not in user_media_accumulation:
+        return # Ничего не накопилось или уже обработано
 
-    # Путь к папке пользователя
+    # Получаем данные и сразу удаляем из словаря, чтобы избежать повторной обработки
+    media_data = user_media_accumulation.pop(user_id, None)
+    if not media_data or not media_data.get("files"):
+        return # Пустые данные
+
+    messages_to_process = media_data["files"]
     user_folder = os.path.join(MEDIA_FOLDER, str(user_id))
+    username = messages_to_process[0].from_user.username or f"ID: {user_id}" # Берем из первого сообщения
 
-    # Если это часть медиагруппы
-    if message.media_group_id:
-        media_group_id = message.media_group_id
+    logging.info(f"Начало обработки {len(messages_to_process)} медиафайлов для пользователя {username} ({user_id}).")
 
-        # Создаем запись для медиагруппы, если её ещё нет
-        if media_group_id not in media_groups:
-            media_groups[media_group_id] = {
-                "files": [],
-                "sender_id": user_id,
-                "username": username,
-                "timestamp": time.time()
-            }
+    # 1. Удаляем старые файлы (если папка существует)
+    if os.path.exists(user_folder):
+        try:
+            shutil.rmtree(user_folder)
+            logging.info(f"Старая папка {user_folder} удалена.")
+        except Exception as e:
+            logging.error(f"Ошибка при удалении старой папки {user_folder}: {e}")
+            # Продолжаем выполнение, попытаемся создать папку заново
 
-        # Добавляем файл в медиагруппу
-        media_groups[media_group_id]["files"].append(message)
+    # 2. Создаем папку заново
+    try:
+        os.makedirs(user_folder, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Не удалось создать папку {user_folder}: {e}")
+        # Отправляем сообщение об ошибке пользователю? Или только админу?
+        # await bot.send_message(user_id, "Ошибка сохранения ваших файлов.")
+        return # Прерываем обработку, если не можем создать папку
 
-        # Ожидаем завершения медиагруппы (например, 5 секунд после последнего файла)
-        await asyncio.sleep(5)
+    # 3. Скачиваем и сохраняем новые файлы
+    saved_count = 0
+    for message in messages_to_process:
+        file_info = None
+        file_ext = ".dat" # Расширение по умолчанию
+        file_name_base = str(time.time_ns()) # Уникальное имя файла на основе времени
 
-        # Проверяем, завершена ли медиагруппа
-        if media_group_id in media_groups and time.time() - media_groups[media_group_id]["timestamp"] > 5:
-            files = media_groups[media_group_id]["files"]
+        if message.photo:
+            file_info = message.photo[-1] # Берем наибольшее разрешение
+            file_ext = ".jpg"
+            file_name_base = file_info.file_unique_id # Используем уникальный ID файла
+        elif message.video:
+            file_info = message.video
+            file_ext = ".mp4"
+            file_name_base = file_info.file_unique_id
+        elif message.document:
+            file_info = message.document
+            # Пытаемся получить расширение из имени файла, если есть
+            original_filename = getattr(file_info, 'file_name', '')
+            if original_filename:
+                 _, ext = os.path.splitext(original_filename)
+                 if ext: file_ext = ext.lower()
+            file_name_base = file_info.file_unique_id
+        # Добавить другие типы медиа при необходимости (audio, voice, animation)
 
-            # Удаляем старые медиа, если они существуют
-            if os.path.exists(user_folder):
-                try:
-                    shutil.rmtree(user_folder)
-                except Exception as e:
-                    logging.error(f"Ошибка при удалении старых файлов: {e}")
+        if file_info:
+            destination_path = os.path.join(user_folder, f"{file_name_base}{file_ext}")
+            try:
+                await bot.download_file_by_id(file_info.file_id, destination=destination_path)
+                saved_count += 1
+                # logging.debug(f"Файл {file_info.file_id} сохранен в {destination_path}")
+            except Exception as e:
+                logging.error(f"Ошибка скачивания файла {file_info.file_id} для пользователя {user_id}: {e}")
+        else:
+             logging.warning(f"Сообщение {message.message_id} от {user_id} не содержит известного типа медиа для сохранения.")
 
-            os.makedirs(user_folder, exist_ok=True)
 
-            # Сохраняем новые медиа
-            for file in files:
-                file_path = None
-                if file.photo:
-                    file_id = file.photo[-1].file_id
-                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.jpg"))
-                elif file.document:
-                    file_id = file.document.file_id
-                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.doc"))
-                elif file.video:
-                    file_id = file.video.file_id
-                    file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.mp4"))
+    logging.info(f"Завершение обработки медиа для {username} ({user_id}). Сохранено {saved_count} из {len(messages_to_process)} файлов.")
+    # Можно отправить подтверждение пользователю (опционально)
+    # try:
+    #     await bot.send_message(user_id, f"✅ Ваши {saved_count} медиафайла(ов) сохранены.")
+    # except Exception:
+    #      pass
 
-            # Удаляем медиагруппу из временного словаря
-            del media_groups[media_group_id]
+# --- Обновленный обработчик ЛЮБЫХ сообщений для накопления медиа ---
+@dp.message_handler(content_types=types.ContentType.ANY)
+async def handle_all_messages(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    # Сначала обновляем никнейм (если нужно)
+    if username and user_nicknames.get(user_id) != username:
+         user_nicknames[user_id] = username
+         save_data()
+         logging.info(f"Обновлен никнейм (через сообщение) для {user_id}: @{username}")
+    elif user_id not in user_nicknames and not username: # Если ника нет и не было
+         if user_id not in user_nicknames or user_nicknames[user_id] is None: # Проверяем, чтобы не перезаписать существующий пустой
+             user_nicknames[user_id] = ""
+             save_data()
+
+    # Проверяем, содержит ли сообщение медиа, которое мы хотим сохранить
+    is_media_to_save = message.photo or message.video or message.document # Добавьте другие типы если нужно
+
+    if is_media_to_save:
+        logging.debug(f"Получено медиа сообщение {message.message_id} от {user_id}")
+        # Гарантируем наличие записи для пользователя
+        if user_id not in user_media_accumulation:
+            user_media_accumulation[user_id] = {"files": [], "timer_task": None}
+
+        # Отменяем предыдущий таймер, если он есть
+        if user_media_accumulation[user_id]["timer_task"]:
+            user_media_accumulation[user_id]["timer_task"].cancel()
+            logging.debug(f"Таймер обработки медиа для {user_id} отменен.")
+
+        # Добавляем текущее сообщение в список
+        user_media_accumulation[user_id]["files"].append(message)
+        logging.debug(f"Медиа сообщение {message.message_id} добавлено в очередь для {user_id}. Всего в очереди: {len(user_media_accumulation[user_id]['files'])}")
+
+
+        # Запускаем новый таймер
+        # Создаем задачу, которая сначала ждет, а потом вызывает обработчик
+        new_task = asyncio.create_task(
+             delayed_media_processing(user_id, MEDIA_ACCUMULATION_DELAY)
+             )
+        user_media_accumulation[user_id]["timer_task"] = new_task
+        logging.debug(f"Новый таймер обработки медиа для {user_id} запущен на {MEDIA_ACCUMULATION_DELAY} сек.")
 
     else:
-        # Если это отдельный файл, удаляем старые медиа и сохраняем новый файл
-        if os.path.exists(user_folder):
-            try:
-                shutil.rmtree(user_folder)
-            except Exception as e:
-                logging.error(f"Ошибка при удалении старых файлов: {e}")
+        # Если это не медиа, возможно, это команда или текст, который должен обрабатываться другими хендлерами
+        # Если этот хендлер последний, он поймает все, что не поймали предыдущие.
+        # Можно добавить логирование или сообщение пользователю "Неизвестная команда"
+        if not message.text or not message.text.startswith('/'): # Игнорируем команды, они должны быть обработаны выше
+             logging.info(f"Получено не-медиа сообщение от {user_id}: {message.text[:50]}...")
+             # await message.reply("Неизвестная команда или тип сообщения.") # Отвечать или нет - по желанию
 
-        os.makedirs(user_folder, exist_ok=True)
-
-        file_path = None
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.jpg"))
-        elif message.document:
-            file_id = message.document.file_id
-            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.doc"))
-        elif message.video:
-            file_id = message.video.file_id
-            file_path = await bot.download_file_by_id(file_id, destination=os.path.join(user_folder, f"{file_id}.mp4"))
+async def delayed_media_processing(user_id: int, delay: float):
+     """Корутина, которая ждет `delay` секунд, а затем вызывает обработчик."""
+     await asyncio.sleep(delay)
+     logging.debug(f"Таймер для {user_id} истек. Запуск process_accumulated_media.")
+     try:
+         # Запускаем фактическую обработку в фоне, чтобы не блокировать
+         asyncio.create_task(process_accumulated_media(user_id))
+     except Exception as e:
+         logging.error(f"Ошибка при запуске process_accumulated_media для {user_id}: {e}")
 
 # Обновление никнеймов при взаимодействии с ботом
 @dp.message_handler()

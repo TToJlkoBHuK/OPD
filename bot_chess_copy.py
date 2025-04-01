@@ -15,6 +15,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     encoding="utf-8"
 )
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
 
 # Инициализация бота
 API_TOKEN = ''  # Замените на ваш токен
@@ -28,6 +31,7 @@ USERS_FILE = "users.txt"  # Файл для хранения ID пользова
 BROADCAST_TEMPLATE_FILE = "broadcast_template.txt"  # Файл для хранения шаблона рассылки
 # Путь к папке для хранения медиа
 MEDIA_FOLDER = "user_media"
+GROUPS_DATA_FILE = "groups_data.txt"
 
 # Глобальные переменные
 ADMIN_IDS = [1881684121, 5312321185]  # 5312321185 Rus 1881684121
@@ -47,6 +51,10 @@ message_queue = asyncio.Queue()
 
 # Задержка между отправками сообщений (в секундах)
 SEND_DELAY = 1
+
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
 
 # Создаем папку для медиа, если она не существует
 if not os.path.exists(MEDIA_FOLDER):
@@ -77,7 +85,10 @@ async def process_message_queue():
 global_group_index = 0
 
 def load_data():
-    global sent_groups, current_group_index, user_bans, users_status, global_group_index, user_nicknames
+    global groups_data, sent_groups, current_group_index, user_bans, users_status, global_group_index, user_nicknames
+    
+    # Загрузка groups_data из файла
+    groups_data = load_groups_data() or []
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -102,6 +113,18 @@ def load_data():
         else:
             global_group_index = 0  # Если sent_groups пуст, начинаем с нуля
 
+    all_indices = set()
+    duplicates_found = False
+    for user_id, indices in sent_groups.items():
+        for idx in indices:
+            if idx in all_indices:
+                logging.warning(f"Дубликат индекса {idx} у пользователя {user_id}")
+                duplicates_found = True
+            all_indices.add(idx)
+    
+    if duplicates_found:
+        logging.error("Обнаружены дублирующиеся индексы в прогрессах пользователей!")
+    
     if os.path.exists(BANS_FILE):
         with open(BANS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -135,7 +158,10 @@ def load_data():
                         user_nicknames[int(user_id)] = nickname
                     except ValueError as e:
                         logging.error(f"Ошибка при загрузке никнейма из строки: {line.strip()}. Ошибка: {e}")
-
+    if sent_groups:
+        global_group_index = max(all_indices, default=0) + 1
+    else:
+        global_group_index = 0
 # Сохранение данных в файлы
 def save_data():
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
@@ -164,6 +190,26 @@ def is_user_banned(user_id):
             users_status[user_id] = ""  # Сбрасываем статус
             save_data()
     return False
+
+def save_groups_data(groups):
+    with open(GROUPS_DATA_FILE, "w", encoding="utf-8") as f:
+        for group in groups:
+            f.write(f"{group[0]},{group[1]}\n")
+
+def load_groups_data():
+    if os.path.exists(GROUPS_DATA_FILE):
+        groups = []
+        with open(GROUPS_DATA_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) == 2:
+                    groups.append((parts[0], int(parts[1])))
+        return groups
+    return None
+
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
 
 # Клавиатура для пользователей
 def get_user_keyboard():
@@ -215,6 +261,10 @@ def get_users_list_keyboard():
         keyboard.add(InlineKeyboardButton(button_text, callback_data=f"user_select:{user_id}"))
     return keyboard
 
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+
 # Загрузка шаблона рассылки
 def load_broadcast_template():
     if os.path.exists(BROADCAST_TEMPLATE_FILE):
@@ -244,24 +294,25 @@ def save_broadcast_template(template_text):
     with open(BROADCAST_TEMPLATE_FILE, "w", encoding="utf-8") as f:
         f.write(template_text)
 
-# Обработка Excel-файла и создание групп
+# Обработка Excel-файла и создание уникальных групп
 def process_excel():
-    logging.info("Читаем данные из Excel и формируем группы...")
+    logging.info("Processing Excel and forming groups...")
     filename = 'lichess_club_admins.xlsx'
     workbook = load_workbook(filename)
     sheet = workbook.active
-    af_column_index = 32  # AF
+    af_column_index = 32
     data = []
+
     for row in sheet.iter_rows(min_row=2, values_only=True):
         club_url = row[0]
         active_admins = row[af_column_index - 1]
         data.append((club_url, active_admins))
-    # Сортируем данные по убыванию количества активных администраторов
-    data_sorted = sorted(data, key=lambda x: x[1], reverse=True)
-    # Каждая группа — это одна ссылка клуба
-    groups = [[club] for club in data_sorted]
-    logging.info(f"Создано {len(groups)} групп")
-    return groups
+
+    unique_data = list(set(data))
+    unique_data_sorted = sorted(unique_data, key=lambda x: x[1], reverse=True)
+    
+    save_groups_data(unique_data_sorted)  # Сохраняем группы в файл
+    return unique_data_sorted
 
 # Функция для создания групп
 def create_group(data_sorted, group_size, target_sum):
@@ -277,6 +328,10 @@ def create_group(data_sorted, group_size, target_sum):
             break
     data_sorted = [item for i, item in enumerate(data_sorted) if i not in removed_indices]
     return current_group, data_sorted
+
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
 
 # Автоматическое восстановление блокировки через 24 часа
 async def restore_ban_if_inactive(user_id):
@@ -298,6 +353,10 @@ async def restore_ban_if_inactive(user_id):
             )
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+
+#===================================================================================================================================================================
+#===================================================================================================================================================================
+#===================================================================================================================================================================
 
 # Команда /start
 @dp.message_handler(commands=['start'])
@@ -332,18 +391,24 @@ async def send_welcome(message: types.Message):
 # Команда /run (для администраторов)
 @dp.message_handler(commands=['run'])
 async def run_script(message: types.Message):
+    global groups_data
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         await message.answer("У вас нет прав для выполнения этой команды.")
         return
+    
     await message.answer("Запускаю скрипт... Пожалуйста, подождите.")
     try:
-        global groups_data
-        groups_data = process_excel()
-        await message.answer(f"Группы успешно созданы. Всего групп: {len(groups_data)}")
+        # Если файл с группами уже существует, используем его
+        if not os.path.exists(GROUPS_DATA_FILE):
+            groups_data = process_excel()
+        else:
+            groups_data = load_groups_data()
+        
+        await message.answer(f"Группы успешно загружены. Всего групп: {len(groups_data)}")
     except Exception as e:
-        logging.error(f"Произошла ошибка: {e}")
-        await message.answer(f"Произошла ошибка: {str(e)}", parse_mode=None)
+        logging.error(f"Error: {e}")
+        await message.answer(f"Ошибка: {str(e)}")
 
 # Команда /send_groups (для администраторов)
 @dp.message_handler(commands=['send_groups'])
@@ -356,6 +421,17 @@ async def send_groups(message: types.Message):
         await message.answer("Группы еще не созданы. Сначала выполните команду /run.")
         return
     await message.answer("Готово! Пользователи могут начать получать группы.")
+
+#clean progress
+@dp.message_handler(commands=['reset_groups'])
+async def reset_groups(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    global sent_groups, groups_data
+    sent_groups = {}
+    groups_data = process_excel()  # Пересоздать группы
+    save_data()
+    await message.answer("Прогресс всех пользователей сброшен, группы пересозданы.")
 
 # Команда /users (для администраторов)
 @dp.message_handler(commands=['users'])
@@ -597,42 +673,35 @@ async def set_user_status(callback_query: types.CallbackQuery):
 # Обработка кнопки "Получить следующую группу"
 @dp.callback_query_handler(lambda c: c.data == "get_next_group")
 async def get_next_group(callback_query: types.CallbackQuery):
-    global global_group_index  # Используем глобальный счетчик
     user_id = callback_query.from_user.id
-
-    # Проверяем, есть ли группы для отправки
     if not groups_data:
-        await bot.answer_callback_query(callback_query.id, "Группы еще не созданы. Сначала выполните команду /run.")
+        await bot.answer_callback_query(callback_query.id, "Нет доступных групп.")
         return
 
-    # Получаем индекс текущей группы для пользователя
-    if user_id in current_group_index:
-        group_index = current_group_index[user_id] + 1  # Начинаем со следующей группы
+    # Получаем список всех использованных индексов
+    used_indices = set()
+    for indices in sent_groups.values():
+        used_indices.update(indices)
+
+    # Ищем первый свободный индекс
+    next_index = 0
+    while next_index < len(groups_data):
+        if next_index not in used_indices:
+            break
+        next_index += 1
     else:
-        group_index = global_group_index  # Если пользователь новый, используем глобальный индекс
+        await bot.answer_callback_query(callback_query.id, "Все группы закончились.")
+        return
 
-    # Проверяем, остались ли группы для отправкиs
-    if group_index >= len(groups_data):
-        group_index = 0  # Сбрасываем счетчик, если достигнут конец списка групп
-        await bot.answer_callback_query(callback_query.id, "Группы закончились. Начинаем сначала.")
-
-    # Получаем группу
-    group = groups_data[group_index]
-
-    # Формируем сообщение с информацией о группе
-    club_url, active_admins = group[0]
-    group_message = f"{club_url} ({active_admins} активных админов)"
-    await bot.send_message(user_id, f"Ваша группа:\n{group_message}")
-
-    # Обновляем данные о отправленных группах
+    # Сохраняем прогресс
     if user_id not in sent_groups:
         sent_groups[user_id] = []
-    sent_groups[user_id].append(group_index)
-    current_group_index[user_id] = group_index  # Обновляем текущий индекс для пользователя
+    sent_groups[user_id].append(next_index)
     save_data()
 
-    # Увеличиваем глобальный счетчик для следующего пользователя
-    global_group_index = max(global_group_index, group_index + 1)
+    # Отправляем группу
+    club_url, active_admins = groups_data[next_index]
+    await bot.send_message(user_id, f"Группа {next_index+1}/{len(groups_data)}:\n{club_url} ({active_admins} админов)")
 
     # Удаляем старое сообщение с кнопкой
     await bot.delete_message(chat_id=user_id, message_id=callback_query.message.message_id)

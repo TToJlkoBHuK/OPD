@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '5425716415:AAF1K7oads37BfNpvCTpBqDQOBcGzGnK0Ww' # ВАШ ТОКЕН
+API_TOKEN = '' # ВАШ ТОКЕН
 ADMIN_IDS = [1881684121, 5312321185] # ID администраторов
 
 # --- ФАЙЛЫ ДАННЫХ ---
